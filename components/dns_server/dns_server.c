@@ -4,19 +4,19 @@
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
 
-#include <sys/param.h>
 #include <inttypes.h>
+#include <sys/param.h>
 
-#include "esp_log.h"
-#include "esp_system.h"
 #include "esp_check.h"
+#include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 
+#include "dns_server.h"
 #include "lwip/err.h"
+#include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
-#include "lwip/netdb.h"
-#include "dns_server.h"
 
 #define DNS_PORT (53)
 #define DNS_MAX_LEN (256)
@@ -29,8 +29,7 @@
 static const char *TAG = "dns_redirect_server";
 
 // DNS Header Packet
-typedef struct __attribute__((__packed__))
-{
+typedef struct __attribute__((__packed__)) {
     uint16_t id;
     uint16_t flags;
     uint16_t qd_count;
@@ -46,8 +45,7 @@ typedef struct {
 } dns_question_t;
 
 // DNS Answer Packet
-typedef struct __attribute__((__packed__))
-{
+typedef struct __attribute__((__packed__)) {
     uint16_t ptr_offset;
     uint16_t type;
     uint16_t class;
@@ -68,8 +66,7 @@ struct dns_server_handle {
     Parse the name from the packet from the DNS name format to a regular .-seperated name
     returns the pointer to the next part of the packet
 */
-static char *parse_dns_name(char *raw_name, char *parsed_name, size_t parsed_name_max_len)
-{
+static char *parse_dns_name(char *raw_name, char *parsed_name, size_t parsed_name_max_len) {
 
     char *label = raw_name;
     char *name_itr = parsed_name;
@@ -97,8 +94,7 @@ static char *parse_dns_name(char *raw_name, char *parsed_name, size_t parsed_nam
 }
 
 // Parses the DNS request and prepares a DNS response with the IP of the softAP
-static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t dns_reply_max_len, dns_server_handle_t h)
-{
+static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t dns_reply_max_len, dns_server_handle_t h) {
     if (req_len > dns_reply_max_len) {
         return -1;
     }
@@ -109,8 +105,7 @@ static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t 
 
     // Endianess of NW packet different from chip
     dns_header_t *header = (dns_header_t *)dns_reply;
-    ESP_LOGD(TAG, "DNS query with header id: 0x%X, flags: 0x%X, qd_count: %d",
-             ntohs(header->id), ntohs(header->flags), ntohs(header->qd_count));
+    ESP_LOGD(TAG, "DNS query with header id: 0x%X, flags: 0x%X, qd_count: %d", ntohs(header->id), ntohs(header->flags), ntohs(header->qd_count));
 
     // Not a standard query
     if ((header->flags & OPCODE_MASK) != 0) {
@@ -148,7 +143,7 @@ static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t 
         ESP_LOGD(TAG, "Received type: %d | Class: %d | Question for: %s", qd_type, qd_class, name);
 
         if (qd_type == QD_TYPE_A) {
-            esp_ip4_addr_t ip = { .addr = IPADDR_ANY };
+            esp_ip4_addr_t ip = {.addr = IPADDR_ANY};
             // Check the configured rules to decide whether to answer this question or not
             for (int i = 0; i < h->num_of_entries; ++i) {
                 // check if the name either corresponds to the entry, or if we should answer to all queries ("*")
@@ -164,7 +159,7 @@ static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t 
                     }
                 }
             }
-            if (ip.addr == IPADDR_ANY) {    // no rule applies, continue with another question
+            if (ip.addr == IPADDR_ANY) { // no rule applies, continue with another question
                 continue;
             }
             dns_answer_t *answer = (dns_answer_t *)cur_ans_ptr;
@@ -187,8 +182,7 @@ static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t 
     Sets up a socket and listen for DNS queries,
     replies to all type A queries with the IP of the softAP
 */
-void dns_server_task(void *pvParameters)
-{
+void dns_server_task(void *pvParameters) {
     char rx_buffer[128];
     char addr_str[128];
     int addr_family;
@@ -267,8 +261,7 @@ void dns_server_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-dns_server_handle_t start_dns_server(dns_server_config_t *config)
-{
+dns_server_handle_t start_dns_server(dns_server_config_t *config) {
     dns_server_handle_t handle = calloc(1, sizeof(struct dns_server_handle) + config->num_of_entries * sizeof(dns_entry_pair_t));
     ESP_RETURN_ON_FALSE(handle, NULL, TAG, "Failed to allocate dns server handle");
 
@@ -280,8 +273,7 @@ dns_server_handle_t start_dns_server(dns_server_config_t *config)
     return handle;
 }
 
-void stop_dns_server(dns_server_handle_t handle)
-{
+void stop_dns_server(dns_server_handle_t handle) {
     if (handle) {
         handle->started = false;
         vTaskDelete(handle->task);

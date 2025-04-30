@@ -2,80 +2,119 @@
 #include "esp_log.h"
 #include "led_plate.inc"
 
-static const char* TAG = "led plate";
+#define LED_STRIP_GPIO_PIN CONFIG_LEDS_STRIP
+#define LED_STRIP_LED_COUNT 100
+#define LED_STRIP_RMT_RES_HZ (10 * 1000 * 1000)
+
+static const char *TAG = "led plate";
 
 uint8_t currentImage = 0;
-uint8_t imageToShow[300] = { 0 };
-uint8_t imageDisplayed[300] = { 0 };
+// uint8_t currentFrame = 0;
+
+// Pixel frameToShow[100] = {0};
+// Pixel frameDisplayed[100] = {0};
+
+Pixel frameBuffer[LED_STRIP_LED_COUNT];
+Pixel frameBufferDisplayed[LED_STRIP_LED_COUNT];
+
+Image imageToShowBase;
+Image imageToShow;
+Image imageToTmp;
 
 bool showCustom = false;
 bool settedCustom = false;
 bool ledsOn = true;
-float currentBrightness = 0.10f;
-float lastBrightness = 0.0;
-float beforeFadeBrightness = 0.0;
-const float minBrightness = 0.01f;
-const float maxBrightness = 0.15f;
-const float turboBrightness = 0.15f;
-const float fadeBrightness = 0.04f;
-const float brightnessStep = 0.01f;
+
+uint8_t currentBrightness = 10;
+uint8_t lastBrightness = 0;
+uint8_t beforeFadeBrightness = 0;
+const uint8_t minBrightness = 1;
+const uint8_t maxBrightness = 15;
+const uint8_t turboBrightness = 15;
+const uint8_t fadeBrightness = 4;
+const uint8_t brightnessStep = 1;
 
 unsigned long lastActivity = 0;
 bool autoFadeLeds = true;
 bool autoFaded = false;
 
-uint8_t ledShifterState = 0;
+static uint8_t step = 0;
+const uint8_t steps = 20;
+
+// Todo: maybe add global shifter state for galery cicle?
+//  uint8_t ledShifterState = 0;
 
 int lastActivitySecondsDelta = 600;
-uint32_t oneImageShowMilles = 6000;
+// Todo: move to images array!
+// uint32_t oneImageShowMilles = 6000;
 
-SemaphoreHandle_t xSemaphore = NULL;
+static SemaphoreHandle_t xSemaphore = NULL;
 
-// Todo: some gamma corrections needed
-uint32_t createRGBbr(int r, int g, int b, float bright) { return ((((int)(g * bright) & 0xff) << 16) | (((int)(r * bright) & 0xff) << 8) | ((int)(b * bright) & 0xff)) & 0xffffff; }
+static led_strip_handle_t led_strip;
 
-uint32_t createRGB(int r, int g, int b) { return createRGBbr(r, g, b, 0.1f); }
+led_strip_handle_t configure_led(void) {
 
-void showImage(uint8_t pixels[])
-{
+    led_strip_config_t strip_config = {.strip_gpio_num = LED_STRIP_GPIO_PIN,
+                                       .max_leds = LED_STRIP_LED_COUNT,
+                                       .led_model = LED_MODEL_WS2812,
+                                       .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+                                       .flags = {
+                                           .invert_out = false,
+                                       }};
+
+    led_strip_rmt_config_t rmt_config = {.clk_src = RMT_CLK_SRC_DEFAULT,
+                                         .resolution_hz = LED_STRIP_RMT_RES_HZ,
+                                         .mem_block_symbols = 64,
+                                         .flags = {
+                                             .with_dma = false, // DMA feature is available on chips like ESP32-S3/P4
+                                         }};
+
+    led_strip_handle_t led_strip_;
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip_));
+    ESP_LOGI(TAG, "Created LED strip object with RMT backend");
+    ESP_ERROR_CHECK(led_strip_clear(led_strip_));
+    return led_strip_;
+}
+
+void showFrame(const Pixel pixels[]) {
     if (xSemaphore != NULL && xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-        struct led_state new_state;
-        // fix some pixels colors on low brightness
-        for (int leds = 0; leds < NUM_LEDS; leds++) {
-            new_state.leds[leds] = 0;
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, LED_STRIP_LED_COUNT - 1 - leds, pixels[leds].r * currentBrightness / 100, pixels[leds].g * currentBrightness / 100,
+                                                pixels[leds].b * currentBrightness / 100));
         }
-        ws2812_write_leds(new_state);
-        ws2812_write_leds(new_state);
-
-        for (int leds = 0; leds < NUM_LEDS; leds++) {
-            new_state.leds[NUM_LEDS - 1 - leds] = createRGBbr(pixels[leds * 3], pixels[leds * 3 + 1], pixels[leds * 3 + 2], currentBrightness);
-        }
-        ws2812_write_leds(new_state);
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
         xSemaphoreGive(xSemaphore);
     }
 }
 
-void showImageBr(uint8_t pixels[])
-{
-    struct led_state new_state;
-    for (float br = 0.01f; br < 0.15f; br += 0.01f) {
-        for (int leds = 0; leds < NUM_LEDS; leds++) {
-            new_state.leds[NUM_LEDS - 1 - leds] = createRGBbr(pixels[leds * 3], pixels[leds * 3 + 1], pixels[leds * 3 + 2], br);
+void showBlackFrame() {
+    if (xSemaphore != NULL && xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, leds, 0, 0, 0));
         }
-        ws2812_write_leds(new_state);
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+        xSemaphoreGive(xSemaphore);
+    }
+}
+
+void showFrameBr(const Pixel pixels[]) {
+    for (uint8_t br = 1; br < 15; br++) {
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, LED_STRIP_LED_COUNT - 1 - leds, pixels[leds].r * br / 100, pixels[leds].g * br / 100, pixels[leds].b * br / 100));
+        }
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
         vTaskDelay(150 / portTICK_PERIOD_MS);
     }
-    for (float br = 0.15f; br > 0.10f; br -= 0.01f) {
-        for (int leds = 0; leds < NUM_LEDS; leds++) {
-            new_state.leds[NUM_LEDS - 1 - leds] = createRGBbr(pixels[leds * 3], pixels[leds * 3 + 1], pixels[leds * 3 + 2], br);
+    for (uint8_t br = 15; br > 10; br -= 1) {
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, LED_STRIP_LED_COUNT - 1 - leds, pixels[leds].r * br / 100, pixels[leds].g * br / 100, pixels[leds].b * br / 100));
         }
-        ws2812_write_leds(new_state);
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
         vTaskDelay(150 / portTICK_PERIOD_MS);
     }
 }
 
-void setAutoFade()
-{
+void setAutoFade() {
     if (autoFadeLeds && lastActivity > 0 && ledsOn) {
         ESP_LOGI(TAG, "Fade last activity check");
         if (lastActivity + lastActivitySecondsDelta < (xTaskGetTickCount() * portTICK_PERIOD_MS) / 1000) {
@@ -95,172 +134,221 @@ void setAutoFade()
     }
 }
 
-void updateLastActivity()
-{
-    ESP_LOGI(TAG, "Update last activity %lu", lastActivity);
+void updateLastActivity() {
+    // ESP_LOGI(TAG, "Update last activity %lu", lastActivity);
     lastActivity = (xTaskGetTickCount() * portTICK_PERIOD_MS) / 1000;
-
-    ESP_LOGI(TAG, "beforefade bight  `%lf`  curr bigth `%lf`", beforeFadeBrightness, currentBrightness);
+    // ESP_LOGI(TAG, "beforefade bight  `%u`  curr bigth `%u`", beforeFadeBrightness, currentBrightness);
 }
 
-void tickNextBaseImage()
-{
+void showTestColorOld(int r, int g, int b) {
+    for (uint8_t br = 1; br < 25; br++) {
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, LED_STRIP_LED_COUNT - 1 - leds, r * br / 100, g * br / 100, b * br / 100));
+        }
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
+    for (uint8_t br = 25; br > 5; br -= 1) {
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, LED_STRIP_LED_COUNT - 1 - leds, r * br / 100, g * br / 100, b * br / 100));
+        }
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+void showColor(uint8_t r, uint8_t g, uint8_t b) {
+    ledsOn = false;
+    if (xSemaphore != NULL && xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
+        for (size_t leds = 0; leds < LED_STRIP_LED_COUNT; leds++) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, LED_STRIP_LED_COUNT - 1 - leds, r * maxBrightness / 100, g * maxBrightness / 100, b * maxBrightness / 100));
+        }
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+        xSemaphoreGive(xSemaphore);
+    }
+}
+
+void setframeBufferDisplayed(const Pixel pixels[]) {
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        frameBufferDisplayed[i] = pixels[i];
+    }
+}
+
+void copyBuffers() {
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        frameBufferDisplayed[i] = frameBuffer[i];
+    }
+}
+
+void shiftLedsDown() {
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        if (i < 90) {
+            frameBuffer[i + 10] = frameBufferDisplayed[i];
+        } else {
+            frameBuffer[i - 90] = frameBufferDisplayed[i];
+        }
+    }
+}
+
+void shiftLedsUp() {
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        if (i < 10) {
+            frameBuffer[i + 90] = frameBufferDisplayed[i];
+        } else {
+            frameBuffer[i - 10] = frameBufferDisplayed[i];
+        }
+    }
+}
+
+void shiftLedsRight() {
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        if (i % 10 == 9) {
+            frameBuffer[i - 9] = frameBufferDisplayed[i];
+        } else {
+            frameBuffer[i + 1] = frameBufferDisplayed[i];
+        }
+    }
+}
+
+void shiftLedsLeft() {
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        if (i % 10 == 0) {
+            frameBuffer[i + 9] = frameBufferDisplayed[i];
+        } else {
+            frameBuffer[i - 1] = frameBufferDisplayed[i];
+        }
+    }
+}
+
+void breathEffect() {
+    if (step / 10 == 0)
+        currentBrightness--;
+    else if (step != 19)
+        currentBrightness++;
+
+    for (size_t i = 0; i < LED_STRIP_LED_COUNT; i++) {
+        frameBuffer[i] = frameBufferDisplayed[i];
+    }
+}
+
+Image *getImage() {
+    if (showCustom)
+        return &imageToShow;
+    else
+        return &imageToShowBase;
+}
+
+void shiftBaseLoopStep(void shift()) {
+    if (step == 0) {
+        setframeBufferDisplayed((*getImage()).frames[0].pixels);
+    } else {
+        shift();
+        copyBuffers();
+    }
+    showFrame(frameBufferDisplayed);
+}
+
+void initPlate() {
+    ESP_LOGI(TAG, "Init Plate");
+    led_strip = configure_led();
+    imageToShowBase = baseImages[currentImage];
+    ESP_LOGI(TAG, "Finish Init Plate");
+}
+
+void tickNextBaseImage() {
     if (showCustom)
         return;
 
-    if (currentImage < imagesSize - 1) {
+    ESP_LOGI(TAG, "Tick next base image");
+    if (currentImage < baseImagesSize - 1) {
         currentImage++;
     } else {
         currentImage = 0;
     }
 
-    for (int i = 0; i < 300; i++) {
-        imageDisplayed[i] = images[currentImage][i];
-    }
+    imageToShowBase = baseImages[currentImage];
 }
 
-void showTestColorOld(int r, int g, int b)
-{
-    struct led_state new_state;
-    for (float br = 0.01f; br < 0.25f; br += 0.01f) {
-        for (int leds = 0; leds < NUM_LEDS; leds++) {
-            new_state.leds[NUM_LEDS - 1 - leds] = createRGBbr(r, g, b, br);
+void processImage() {
+    ESP_LOGI(TAG, "processImage step: %i", step);
+    step = 0;
+    if ((*getImage()).framesCount == 1) {
+        while (step < steps) {
+            if (!ledsOn) {
+                step++;
+                vTaskDelay((*getImage()).frames[0].duration / steps / portTICK_PERIOD_MS);
+                continue;
+            }
+
+            switch ((*getImage()).shiftMode) {
+            case 0:
+                showFrame((*getImage()).frames[0].pixels);
+                break;
+            case 1:
+                shiftBaseLoopStep(shiftLedsRight);
+                break;
+            case 2:
+                shiftBaseLoopStep(shiftLedsLeft);
+                break;
+            case 3:
+                shiftBaseLoopStep(shiftLedsUp);
+                break;
+            case 4:
+                shiftBaseLoopStep(shiftLedsDown);
+                break;
+            case 5:
+                shiftBaseLoopStep(breathEffect);
+            case 6:
+                // Todo: wave
+                break;
+            case 7:
+                // Todo: rotation right
+                break;
+            case 8:
+                // Todo: rotation left
+                break;
+            default:
+                showFrame((*getImage()).frames[0].pixels);
+                break;
+            }
+
+            step++;
+            vTaskDelay((*getImage()).frames[0].duration / steps / portTICK_PERIOD_MS);
         }
-        ws2812_write_leds(new_state);
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    for (float br = 0.25f; br > 0.05f; br -= 0.01f) {
-        for (int leds = 0; leds < NUM_LEDS; leds++) {
-            new_state.leds[NUM_LEDS - 1 - leds] = createRGBbr(r, g, b, br);
-        }
-        ws2812_write_leds(new_state);
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-}
 
-void showTestColor(int r, int g, int b)
-{
-    showCustom = true;
-    struct led_state new_state;
-    for (int leds = 0; leds < NUM_LEDS; leds++) {
-        new_state.leds[NUM_LEDS - 1 - leds] = createRGBbr(r, g, b, 0.15f);
-        imageDisplayed[leds * 3] = r;
-        imageDisplayed[leds * 3 + 1] = g;
-        imageDisplayed[leds * 3 + 2] = b;
-    }
-    ws2812_write_leds(new_state);
-}
-
-void initPlate()
-{
-    ws2812_control_init();
-
-    if (showCustom) {
-        for (int i = 0; i < 300; i++) {
-            imageDisplayed[i] = imageToShow[i];
-        }
-    } else {
-        for (int i = 0; i < 300; i++) {
-            imageDisplayed[i] = images[currentImage][i];
-        }
-    }
-}
-
-void showPlate(bool force)
-{
-    setAutoFade();
-    if (ledsOn || force)
-        showImage(imageDisplayed);
-}
-
-void shifLedsDown()
-{
-    uint8_t imgBuffer[300] = { 0 };
-
-    for (int i = 0; i < 300; i++) {
-        if (i < 270) {
-            imgBuffer[i + 30] = imageDisplayed[i];
-        } else {
-            imgBuffer[i - 270] = imageDisplayed[i];
+    } else if ((*getImage()).framesCount > 1) {
+        for (size_t i = 0; i < (*getImage()).framesCount; i++) {
+            if (ledsOn) {
+                showFrame((*getImage()).frames[i].pixels);
+            }
+            vTaskDelay((*getImage()).frames[i].duration / portTICK_PERIOD_MS);
         }
     }
-
-    for (int i = 0; i < 300; i++) {
-        imageDisplayed[i] = imgBuffer[i];
-    }
 }
 
-void shiftLedsRight()
-{
-    uint8_t imgBuffer[300] = { 0 };
-
-    for (int i = 0; i < 300; i++) {
-        if (i % 30 == 27 || i % 30 == 28 || i % 30 == 29) {
-            imgBuffer[i - 27] = imageDisplayed[i];
-        } else {
-            imgBuffer[i + 3] = imageDisplayed[i];
-        }
-    }
-
-    for (int i = 0; i < 300; i++) {
-        imageDisplayed[i] = imgBuffer[i];
-    }
-}
-
-void shiftLeds()
-{
-    if (!ledsOn)
-        return;
-
-    if (ledShifterState == 1)
-        shiftLedsRight();
-    else if (ledShifterState == 2)
-        shifLedsDown();
-}
-
-void plateUpdateTask(void* pvParameters)
-{
+void plateUpdateTask(void *pvParameters) {
     ESP_ERROR_CHECK(gpio_set_direction(26, GPIO_MODE_OUTPUT));
     ESP_ERROR_CHECK(gpio_set_level(26, 1));
     initPlate();
     vSemaphoreCreateBinary(xSemaphore);
+    ESP_LOGI(TAG, "Show plate");
     while (1) {
-        ESP_LOGI(TAG, "Show plate");
-        ESP_LOGI(TAG, "Current brightness -s %f", currentBrightness);
-
-        if (ledShifterState == 0) {
-            showPlate(false);
-            vTaskDelay(oneImageShowMilles / portTICK_PERIOD_MS);
-        } else {
-            for (int i = 0; i < 20; i++) {
-                showPlate(false);
-                vTaskDelay((oneImageShowMilles / 20) / portTICK_PERIOD_MS);
-                shiftLeds();
-            }
-        }
-
-        ESP_LOGI(TAG, "Tick next base image");
         tickNextBaseImage();
+        processImage();
     }
 }
 
-void updateImageToShow(uint8_t pixels[])
-{
-    for (size_t i = 0; i < 300; i++) {
-        imageToShow[i] = pixels[i];
-    }
+void updateImageToShowCustom() {
     showCustom = true;
     settedCustom = true;
-
-    for (int i = 0; i < 300; i++) {
-        imageDisplayed[i] = imageToShow[i];
-    }
-
-    showPlate(false);
 }
 
-void shiftBrightness()
-{
+Image *getImageToShowCustom() { return &imageToShow; }
+
+SemaphoreHandle_t getShowFrameSemaphore() { return xSemaphore; }
+
+void shiftBrightness() {
     updateLastActivity();
     if (ledsOn) {
         ESP_LOGI(TAG, "Shifting led Brightness");
@@ -274,55 +362,52 @@ void shiftBrightness()
         } else {
             currentBrightness += brightnessStep;
         }
-        showPlate(false);
     }
 }
 
-void setTurboBrightness()
-{
+void setTurboBrightness() {
     updateLastActivity();
     if (ledsOn) {
         ESP_LOGI(TAG, "Shifting led Brightness to Turbo");
         currentBrightness = turboBrightness;
-        showPlate(false);
     }
 }
 
-void switchLeds()
-{
+void switchLeds() {
     updateLastActivity();
     if (ledsOn) {
         ledsOn = false;
-        lastBrightness = currentBrightness;
-        currentBrightness = 0.0f;
+        showBlackFrame();
     } else {
-        currentBrightness = lastBrightness;
-        lastBrightness = 0.0f;
         ledsOn = true;
     }
-    showPlate(true);
 }
 
-void switchCustom()
-{
+void reset_showImage(bool tmp) {
+    if (tmp) {
+        imageToShow = imageToTmp;
+        settedCustom = true;
+        return;
+    }
+    showCustom = false;
+    settedCustom = false;
+}
+
+void switchCustom() {
     updateLastActivity();
     if (settedCustom) {
         showCustom = !showCustom;
     }
-    if (showCustom) {
-        for (int i = 0; i < 300; i++) {
-            imageDisplayed[i] = imageToShow[i];
-        }
-    }
 }
 
-void showInt(uint32_t pass, int r, int g, int b)
-{
+void showInt(uint64_t pass, uint8_t r, uint8_t g, uint8_t b) {
     updateLastActivity();
-    ESP_LOGI(TAG, "pass  %lu", pass);
+    ledsOn = false;
+
+    ESP_LOGI(TAG, "pass  %llu", pass);
     int arr[10];
     int i = 0;
-    int j, rr;
+    int rr;
 
     while (pass != 0) {
         rr = pass % 10;
@@ -335,38 +420,56 @@ void showInt(uint32_t pass, int r, int g, int b)
         ESP_LOGI(TAG, " %d", arr[iii]);
     }
 
-    uint8_t imagePixels[300] = { 0 };
-    for (j = i; j > 0; j--) {
+    for (size_t itt = 0; itt < LED_STRIP_LED_COUNT; itt++) {
+        frameBuffer[itt] = (Pixel){0, 0, 0};
+    }
+
+    for (int j = i; j > 0; j--) {
         for (int ii = 0; ii < arr[j - 1]; ii++) {
-            imagePixels[(i - j) * 30 + ii * 3] = r;
-            imagePixels[(i - j) * 30 + ii * 3 + 1] = g;
-            imagePixels[(i - j) * 30 + ii * 3 + 2] = b;
+            frameBuffer[(i - j) * 10 + ii] = (Pixel){r, g, b};
         }
     }
-    ledsOn = false;
-    showImage(imagePixels);
+
+    showFrame(frameBuffer);
     vTaskDelay(15000 / portTICK_PERIOD_MS);
     ledsOn = true;
+    step = 0;
 }
 
-uint8_t getSettedCustom()
-{
+void set_ota_display_image(uint8_t state) {
+    switch (state) {
+    case 0:
+        imageToShow = loadImage;
+        break;
+    case 1:
+        imageToShow = successImage;
+        break;
+    case 2:
+        imageToShow = errorImage;
+        break;
+    default:
+        return;
+    }
+    showCustom = true;
+    ledsOn = true;
+    step = 0;
+}
+
+uint8_t getSettedCustom() {
     if (settedCustom)
         return 1;
     else
         return 0;
 }
 
-void restoreSettedCustom(uint8_t state)
-{
+void restoreSettedCustom(uint8_t state) {
     if (state == 0)
         settedCustom = false;
     else
         settedCustom = true;
 }
 
-uint8_t getShowCustom()
-{
+uint8_t getShowCustom() {
     if (showCustom)
         return 1;
     else
@@ -374,45 +477,40 @@ uint8_t getShowCustom()
 }
 
 /* !!! Call after restoreImageToShow !!!*/
-void restoreShowCustom(uint8_t state)
-{
+void restoreShowCustom(uint8_t state) {
     if (state == 0)
         showCustom = false;
     else
         showCustom = true;
 
-    if (showCustom) {
-        for (int i = 0; i < 300; i++) {
-            imageDisplayed[i] = imageToShow[i];
-        }
-    }
-}
-
-uint8_t* getImageToShow() { return imageToShow; }
-
-void restoreImageToShow(uint8_t pixels[])
-{
-    for (size_t i = 0; i < 300; i++) {
-        imageToShow[i] = pixels[i];
-    }
+    step = 0;
 }
 
 void switchAutoFade() { autoFadeLeds = !autoFadeLeds; }
 
-void switchLedsShiter()
-{
-    if (ledShifterState >= 2)
-        ledShifterState = 0;
+void switchLedsShiter() {
+    if (imageToShow.shiftMode >= 6)
+        imageToShow.shiftMode = 0;
     else
-        ledShifterState++;
+        imageToShow.shiftMode++;
 
-    if (showCustom) {
-        for (int i = 0; i < 300; i++) {
-            imageDisplayed[i] = imageToShow[i];
-        }
-    } else {
-        for (int i = 0; i < 300; i++) {
-            imageDisplayed[i] = images[currentImage][i];
-        }
-    }
+    step = 0;
+    ESP_LOGI(TAG, "shiftMode: %i", imageToShow.shiftMode);
 }
+
+void set_power_display_image(uint8_t percent) {
+    if (percent <= 30) {
+        imageToShow = lowBattery;
+    } else if (percent > 30 && percent <= 60) {
+        imageToShow = mediumBattery;
+    } else if (percent > 60 && percent <= 90) {
+        imageToShow = greenBattery;
+    } else {
+        imageToShow = fullBattery;
+    }
+    showCustom = true;
+    ledsOn = true;
+    step = 0;
+}
+
+void save_img_custom() { imageToTmp = imageToShow; }

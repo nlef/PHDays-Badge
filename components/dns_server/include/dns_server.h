@@ -14,10 +14,10 @@ extern "C" {
 #define DNS_SERVER_MAX_ITEMS 1
 #endif
 
-#define DNS_SERVER_CONFIG_SINGLE(queried_name, netif_key)  {        \
-        .num_of_entries = 1,                                        \
-        .item = { { .name = queried_name, .if_key = netif_key } }   \
-        }
+#define DNS_SERVER_CONFIG_SINGLE(queried_name, netif_key)                                                                                                                                              \
+    {                                                                                                                                                                                                  \
+        .num_of_entries = 1, .item = { {.name = queried_name, .if_key = netif_key} }                                                                                                                   \
+    }
 
 /**
  * @brief Definition of one DNS entry: NAME - IP (or the netif whose IP to answer)
@@ -26,9 +26,9 @@ extern "C" {
  * we don't take copies of the config values `name` and `if_key`
  */
 typedef struct dns_entry_pair {
-    const char* name;       /**<! Exact match of the name field of the DNS query to answer */
-    const char* if_key;     /**<! Use this network interface IP to answer, only if NULL, use the static IP below */
-    esp_ip4_addr_t ip;      /**<! Constant IP address to answer this query, if "if_key==NULL" */
+    const char *name;   /**<! Exact match of the name field of the DNS query to answer */
+    const char *if_key; /**<! Use this network interface IP to answer, only if NULL, use the static IP below */
+    esp_ip4_addr_t ip;  /**<! Constant IP address to answer this query, if "if_key==NULL" */
 } dns_entry_pair_t;
 
 /**
@@ -48,8 +48,8 @@ typedef struct dns_entry_pair {
  * \endcode
  */
 typedef struct dns_server_config {
-    int num_of_entries;                             /**<! Number of rules specified in the config struct */
-    dns_entry_pair_t item[DNS_SERVER_MAX_ITEMS];    /**<! Array of pairs */
+    int num_of_entries;                          /**<! Number of rules specified in the config struct */
+    dns_entry_pair_t item[DNS_SERVER_MAX_ITEMS]; /**<! Array of pairs */
 } dns_server_config_t;
 
 /**
@@ -71,7 +71,6 @@ dns_server_handle_t start_dns_server(dns_server_config_t *config);
  * @param handle DNS server's handle to destroy
  */
 void stop_dns_server(dns_server_handle_t handle);
-
 
 #ifdef __cplusplus
 }
